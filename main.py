@@ -375,17 +375,24 @@ def list_reservas(db: Session = Depends(get_db)):
 
 @app.post("/reservas")
 def create_reserva(data: ReservaCreate, db: Session = Depends(get_db)):
-    r = Reserva(
-        cliente_txt=data.cliente_nombre_temp,
-        producto_txt=data.producto_nombre_temp,
-        cantidad=data.cantidad,
-        fecha_entrega=data.fecha_entrega,
-        estado=data.estado,
-        observaciones=data.observaciones
-    )
-    db.add(r)
-    db.commit()
-    return r
+    try:
+        # Creamos la reserva mapeando los campos temporales a las columnas de texto
+        r = Reserva(
+            cliente_txt=data.cliente_nombre_temp,   # Mapeo correcto
+            producto_txt=data.producto_nombre_temp, # Mapeo correcto
+            cantidad=data.cantidad,
+            fecha_entrega=data.fecha_entrega,
+            estado=data.estado,
+            observaciones=data.observaciones
+        )
+        db.add(r)
+        db.commit()
+        db.refresh(r)
+        return r
+    except Exception as e:
+        db.rollback()
+        print(f"Error creando reserva: {e}") # Esto imprimirá el error real en la consola del backend
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.patch("/reservas/{rid}/estado")
 def update_reserva_estado(rid: int, estado: str, db: Session = Depends(get_db)):
