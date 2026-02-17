@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Numeric, func, desc
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
+from sqlalchemy import text
 
 # --- CONFIGURACIÓN BASE DE DATOS ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sistema_erp.db")
@@ -160,8 +161,18 @@ def get_db():
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
-
-# --- ENDPOINTS ---
+    
+    # --- BLOQUE DE CORRECCIÓN PARA RENDER ---
+    # Esto intentará agregar las columnas faltantes si no existen.
+    # Puedes borrar este bloque después de que funcione una vez.
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE reservas ADD COLUMN IF NOT EXISTS cliente_txt VARCHAR;"))
+            conn.execute(text("ALTER TABLE reservas ADD COLUMN IF NOT EXISTS producto_txt VARCHAR;"))
+            conn.commit()
+            print("--- MIGRACIÓN ÉXITOSA: Columnas agregadas a Reservas ---")
+        except Exception as e:
+            print(f"--- MIGRACIÓN OMITIDA O ERROR: {e} ---")
 
 @app.get("/stats")
 def get_stats(db: Session = Depends(get_db)):
