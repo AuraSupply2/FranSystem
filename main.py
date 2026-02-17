@@ -338,28 +338,32 @@ def create_recibo(data: ReciboCreate, db: Session = Depends(get_db)):
 # === CUENTA CORRIENTE ===
 @app.get("/cuenta-corriente/{cliente_id}")
 def get_cc(cliente_id: int, db: Session = Depends(get_db)):
-    movs = db.query(CuentaCorriente).filter(CuentaCorriente.cliente_id == cliente_id).order_by(desc(CuentaCorriente.fecha)).all()
+    # CAMBIADO: order_by ASCENDENTE en lugar de DESCENDENTE
+    movs = db.query(CuentaCorriente).filter(CuentaCorriente.cliente_id == cliente_id).order_by(CuentaCorriente.fecha.asc()).all()
+    #                                                                                                        ^^^^ ASCENDENTE
     
-    # Calculamos saldo acumulado visualmente (opcional, o se hace en frontend)
-    # Aquí devolvemos la lista cruda
     res = []
-    saldo_acumulado = 0 # Esto es complejo de calcular en orden inverso sin window functions
     
-    # Calculamos saldo total primero
-    debe = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "DEBE").scalar() or 0
-    haber = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "HABER").scalar() or 0
-    saldo_actual = float(debe) - float(haber)
+    # Calcular saldo acumulado correctamente
+    saldo_acumulado = 0.0
     
-    # Devolvemos movimientos con saldo snapshot (simple)
     for m in movs:
+        monto = float(m.monto)
+        
+        if m.tipo == "DEBE":
+            saldo_acumulado += monto
+        else:  # HABER
+            saldo_acumulado -= monto
+        
         res.append({
             "id": m.id,
             "fecha": m.fecha.isoformat(),
             "tipo": m.tipo,
-            "monto": float(m.monto),
+            "monto": monto,
             "concepto": m.concepto,
-            "saldo": 0 # El frontend calcula el historial gráfico
+            "saldo": saldo_acumulado  # <-- AHORA CON SALDO CORRECTO
         })
+    
     return res
 
 @app.get("/cuenta-corriente/{cliente_id}/saldo")
