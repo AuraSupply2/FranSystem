@@ -209,15 +209,40 @@ def get_stats(db: Session = Depends(get_db)):
 # === CLIENTES ===
 @app.get("/clientes")
 def list_clientes(db: Session = Depends(get_db)):
-    return db.query(Cliente).filter(Cliente.activo == True).order_by(Cliente.nombre).all()
-
-@app.post("/clientes")
-def create_cliente(data: ClienteCreate, db: Session = Depends(get_db)):
-    c = Cliente(**data.dict())
-    db.add(c)
-    db.commit()
-    db.refresh(c)
-    return c
+    """
+    Retorna lista de clientes CON su balance calculado en el servidor.
+    Esto evita hacer N peticiones desde el frontend.
+    """
+    clientes = db.query(Cliente).filter(Cliente.activo == True).order_by(Cliente.nombre).all()
+    
+    resultado = []
+    for c in clientes:
+        # Calculamos el saldo en el backend (mucho más rápido que via HTTP)
+        debe = db.query(func.sum(CuentaCorriente.monto)).filter(
+            CuentaCorriente.cliente_id == c.id, 
+            CuentaCorriente.tipo == "DEBE"
+        ).scalar() or 0
+        
+        haber = db.query(func.sum(CuentaCorriente.monto)).filter(
+            CuentaCorriente.cliente_id == c.id, 
+            CuentaCorriente.tipo == "HABER"
+        ).scalar() or 0
+        
+        saldo = float(debe) - float(haber)
+        
+        # Construimos un diccionario con los datos del modelo + el balance
+        c_dict = {
+            "id": c.id,
+            "nombre": c.nombre,
+            "documento": c.documento,
+            "telefono": c.telefono,
+            "email": c.email,
+            "direccion": c.direccion,
+            "balance": saldo  # <--- Campo nuevo agregado
+        }
+        resultado.append(c_dict)
+        
+    return resultado
 
 # === PRODUCTOS ===
 @app.get("/productos")
