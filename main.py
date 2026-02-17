@@ -4,27 +4,19 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Numeric, func
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Numeric, func, desc
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
-from sqlalchemy.exc import IntegrityError
 
 # --- CONFIGURACIÓN BASE DE DATOS ---
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./sistema_erp.db")
 
-# Fix para compatibilidad con Render/Heroku (postgres:// -> postgresql://)
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Fallback para desarrollo local
-if not DATABASE_URL:
-    DATABASE_URL = "sqlite:///./local_test.db"
-
-# CRÍTICO: pool_pre_ping=True evita desconexiones en Render/Neon
 engine = create_engine(
     DATABASE_URL, 
     pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20
+    # connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {} 
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -48,13 +40,11 @@ class Producto(Base):
     id           = Column(Integer, primary_key=True, index=True)
     codigo       = Column(String, unique=True, nullable=False)
     nombre       = Column(String, nullable=False)
-    descripcion  = Column(String, nullable=True)
-    # USO DE NUMERIC PARA DINERO
+    descripcion  = Column(String, nullable=True) # Usado como Categoría en la UI
     precio       = Column(Numeric(12, 2), nullable=False, default=0)
     stock        = Column(Integer, nullable=False, default=0)
     stock_minimo = Column(Integer, default=10)
     activo       = Column(Boolean, default=True)
-    fecha_creacion = Column(DateTime, default=datetime.datetime.utcnow)
 
 class Recibo(Base):
     __tablename__ = "recibos"
@@ -62,10 +52,8 @@ class Recibo(Base):
     numero      = Column(String, unique=True, nullable=False)
     cliente_id  = Column(Integer, ForeignKey("clientes.id"), nullable=True)
     fecha       = Column(DateTime, default=datetime.datetime.utcnow)
-    subtotal    = Column(Numeric(12, 2), default=0)
-    descuento   = Column(Numeric(12, 2), default=0)
     total       = Column(Numeric(12, 2), nullable=False, default=0)
-    estado      = Column(String, default="PENDIENTE") # PENDIENTE, PAGADO, ANULADO
+    estado      = Column(String, default="PENDIENTE")
     observaciones = Column(String, nullable=True)
     items       = relationship("ReciboDetalle", back_populates="recibo", cascade="all, delete-orphan")
 
@@ -82,11 +70,12 @@ class ReciboDetalle(Base):
 class Reserva(Base):
     __tablename__ = "reservas"
     id             = Column(Integer, primary_key=True, index=True)
-    cliente_id     = Column(Integer, ForeignKey("clientes.id"), nullable=True)
-    producto_id    = Column(Integer, ForeignKey("productos.id"), nullable=True)
-    cantidad       = Column(Integer, nullable=False)
+    # Permitimos texto libre si no hay ID relacionado (flexibilidad UI)
+    cliente_txt    = Column(String, nullable=True) 
+    producto_txt   = Column(String, nullable=True)
+    cantidad       = Column(Integer, nullable=False, default=1)
     fecha_reserva  = Column(DateTime, default=datetime.datetime.utcnow)
-    fecha_entrega  = Column(String, nullable=True)
+    fecha_entrega  = Column(String, nullable=True) # Guardamos como ISO string
     estado         = Column(String, default="PENDIENTE")
     observaciones  = Column(String, nullable=True)
 
@@ -104,76 +93,59 @@ class CuentaCorriente(Base):
     __tablename__ = "cuenta_corriente"
     id          = Column(Integer, primary_key=True, index=True)
     cliente_id  = Column(Integer, ForeignKey("clientes.id"))
-    tipo        = Column(String, nullable=False)  # 'DEBE' o 'HABER'
+    tipo        = Column(String, nullable=False)  # 'DEBE' (generado por recibo) o 'HABER' (pago)
     monto       = Column(Numeric(12, 2), nullable=False)
     concepto    = Column(String, nullable=True)
     recibo_id   = Column(Integer, ForeignKey("recibos.id"), nullable=True)
     fecha       = Column(DateTime, default=datetime.datetime.utcnow)
-    saldo       = Column(Numeric(12, 2), nullable=True)
 
 # --- SCHEMAS PYDANTIC ---
 
 class ClienteCreate(BaseModel):
-    nombre:    str
+    nombre: str
     documento: Optional[str] = ""
-    telefono:  Optional[str] = ""
-    email:     Optional[str] = ""
+    telefono: Optional[str] = ""
+    email: Optional[str] = ""
     direccion: Optional[str] = ""
 
 class ProductoCreate(BaseModel):
-    codigo:       str
-    nombre:       str
-    descripcion:  Optional[str] = ""
-    precio:       float
-    stock:        Optional[int] = 0
-    stock_minimo: Optional[int] = 10
+    codigo: str
+    nombre: str
+    descripcion: Optional[str] = "" # Categoria
+    precio: float
+    stock: int
+    stock_minimo: int
 
 class ReciboItemCreate(BaseModel):
-    producto_id:     int
-    cantidad:        int
+    producto_id: int
+    cantidad: int
     precio_unitario: float
-    subtotal:        float
+    subtotal: float
 
 class ReciboCreate(BaseModel):
-    numero:       str
-    cliente_id:   Optional[int] = None
-    subtotal:     Optional[float] = 0
-    descuento:    Optional[float] = 0
-    total:        float
-    estado:       Optional[str] = "PENDIENTE"
+    numero: str
+    cliente_id: int
+    total: float
+    estado: Optional[str] = "PENDIENTE"
     observaciones: Optional[str] = ""
-    items:        List[ReciboItemCreate] = []
+    descuento: Optional[float] = 0
+    items: List[ReciboItemCreate]
 
 class ReservaCreate(BaseModel):
-    cliente_id:    Optional[int] = None
-    producto_id:   Optional[int] = None
-    cantidad:      int
+    cliente_nombre_temp: str
+    producto_nombre_temp: str
+    cantidad: int
     fecha_entrega: Optional[str] = ""
-    estado:        Optional[str] = "PENDIENTE"
+    estado: str
     observaciones: Optional[str] = ""
-
-class VentaCreate(BaseModel):
-    recibo_id:  Optional[int] = None
-    cliente_id: Optional[int] = None
-    total:      float
-    forma_pago: Optional[str] = ""
-    vendedor:   Optional[str] = ""
-
-class CuentaCorrienteCreate(BaseModel):
-    cliente_id: int
-    tipo:       str
-    monto:      float
-    concepto:   Optional[str] = ""
-    recibo_id:  Optional[int] = None
 
 # --- APP ---
 
-app = FastAPI(title="ERP System API", version="1.2.0")
+app = FastAPI(title="ERP System API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -189,45 +161,41 @@ def get_db():
 def startup():
     Base.metadata.create_all(bind=engine)
 
-@app.get("/")
-def root():
-    return {"sistema": "ERP System API", "estado": "online", "db": "conectado"}
-
-# --- STATS ---
+# --- ENDPOINTS ---
 
 @app.get("/stats")
 def get_stats(db: Session = Depends(get_db)):
-    total_recibos = db.query(func.count(Recibo.id)).scalar() or 0
-    productos_stock = db.query(func.count(Producto.id)).filter(Producto.stock > 0, Producto.activo == True).scalar() or 0
-    reservas_activas = db.query(func.count(Reserva.id)).filter(Reserva.estado == "PENDIENTE").scalar() or 0
+    # Datos reales para el Dashboard
+    total_recibos = db.query(func.count(Recibo.id)).scalar()
+    stock_items = db.query(func.count(Producto.id)).filter(Producto.stock > 0).scalar()
+    reservas = db.query(func.count(Reserva.id)).filter(Reserva.estado == "PENDIENTE").scalar()
     
-    # Ventas mes actual
-    ventas_mes = db.query(func.coalesce(func.sum(Venta.total), 0)).filter(
-        func.extract("month", Venta.fecha) == datetime.datetime.utcnow().month,
-        func.extract("year",  Venta.fecha) == datetime.datetime.utcnow().year
+    # Ventas del mes
+    now = datetime.datetime.now()
+    ventas_mes = db.query(func.sum(Recibo.total)).filter(
+        func.extract('month', Recibo.fecha) == now.month,
+        func.extract('year', Recibo.fecha) == now.year
     ).scalar() or 0
 
-    # Cálculo deuda (Simplificado para rendimiento)
-    debe_q = db.query(CuentaCorriente.cliente_id, func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.tipo == "DEBE").group_by(CuentaCorriente.cliente_id).subquery()
-    haber_q = db.query(CuentaCorriente.cliente_id, func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.tipo == "HABER").group_by(CuentaCorriente.cliente_id).subquery()
-    
-    # Contar clientes donde DEBE > HABER (esto es aproximado, idealmente se hace en SQL puro)
-    # Para este ejemplo, retornamos un número estimado o iteramos rápido en python
-    clientes_con_deuda = 0
-    # (Omitimos lógica compleja de deuda aquí para mantener velocidad en dashboard)
+    # Clientes con deuda (cálculo rápido)
+    # Esto es una simplificación. En producción se haría con una query agregada compleja.
+    clientes_deuda = 0
+    clientes = db.query(Cliente.id).all()
+    for cli in clientes:
+        debe = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cli.id, CuentaCorriente.tipo == "DEBE").scalar() or 0
+        haber = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cli.id, CuentaCorriente.tipo == "HABER").scalar() or 0
+        if (debe - haber) > 1: # Margen de error de $1
+            clientes_deuda += 1
 
     return {
-        "total_recibos": total_recibos,
-        "clientes_con_deuda": 0, # Implementar lógica detallada si es necesario
-        "productos_stock": productos_stock,
-        "reservas_activas": reservas_activas,
+        "total_recibos": total_recibos or 0,
+        "clientes_con_deuda": clientes_deuda,
+        "productos_stock": stock_items or 0,
+        "reservas_activas": reservas or 0,
         "ventas_mes": float(ventas_mes)
     }
 
-# ==========================================
-# CLIENTES
-# ==========================================
-
+# === CLIENTES ===
 @app.get("/clientes")
 def list_clientes(db: Session = Depends(get_db)):
     return db.query(Cliente).filter(Cliente.activo == True).order_by(Cliente.nombre).all()
@@ -240,26 +208,7 @@ def create_cliente(data: ClienteCreate, db: Session = Depends(get_db)):
     db.refresh(c)
     return c
 
-@app.put("/clientes/{cid}")
-def update_cliente(cid: int, data: ClienteCreate, db: Session = Depends(get_db)):
-    c = db.query(Cliente).filter(Cliente.id == cid).first()
-    if not c: raise HTTPException(404, "Cliente no encontrado")
-    for k, v in data.dict().items(): setattr(c, k, v)
-    db.commit()
-    return {"status": "ok"}
-
-@app.delete("/clientes/{cid}")
-def delete_cliente(cid: int, db: Session = Depends(get_db)):
-    c = db.query(Cliente).filter(Cliente.id == cid).first()
-    if not c: raise HTTPException(404, "Cliente no encontrado")
-    c.activo = False
-    db.commit()
-    return {"status": "ok"}
-
-# ==========================================
-# PRODUCTOS
-# ==========================================
-
+# === PRODUCTOS ===
 @app.get("/productos")
 def list_productos(db: Session = Depends(get_db)):
     return db.query(Producto).filter(Producto.activo == True).order_by(Producto.nombre).all()
@@ -269,165 +218,173 @@ def create_producto(data: ProductoCreate, db: Session = Depends(get_db)):
     p = Producto(**data.dict())
     db.add(p)
     db.commit()
-    db.refresh(p)
     return p
 
 @app.put("/productos/{pid}")
 def update_producto(pid: int, data: ProductoCreate, db: Session = Depends(get_db)):
     p = db.query(Producto).filter(Producto.id == pid).first()
     if not p: raise HTTPException(404, "Producto no encontrado")
-    for k, v in data.dict().items(): setattr(p, k, v)
+    
+    p.nombre = data.nombre
+    p.descripcion = data.descripcion # Categoria
+    p.precio = data.precio
+    p.stock = data.stock
+    p.stock_minimo = data.stock_minimo
+    # No actualizamos codigo si no es necesario
+    
     db.commit()
     return {"status": "ok"}
 
-@app.delete("/productos/{pid}")
-def delete_producto(pid: int, db: Session = Depends(get_db)):
-    p = db.query(Producto).filter(Producto.id == pid).first()
-    if not p: raise HTTPException(404, "Producto no encontrado")
-    p.activo = False
-    db.commit()
-    return {"status": "ok"}
-
-# ==========================================
-# RECIBOS (LÓGICA CORE ERP)
-# ==========================================
-
+# === RECIBOS Y STOCK (CORE) ===
 @app.get("/recibos")
 def list_recibos(limit: int = 100, db: Session = Depends(get_db)):
-    recibos = db.query(Recibo).order_by(Recibo.fecha.desc()).limit(limit).all()
-    # Mapeo manual simple para evitar problemas de serialización recursiva
+    recibos = db.query(Recibo).order_by(desc(Recibo.fecha)).limit(limit).all()
     res = []
     for r in recibos:
         cli = db.query(Cliente).filter(Cliente.id == r.cliente_id).first()
         res.append({
-            "id": r.id, "numero": r.numero, 
-            "cliente": cli.nombre if cli else "N/A",
-            "fecha": r.fecha, "total": float(r.total), "estado": r.estado
-        })
-    return res
-
-@app.get("/recibos/filtrar")
-def filtrar_recibos(desde: str, hasta: str, db: Session = Depends(get_db)):
-    recibos = db.query(Recibo).filter(Recibo.fecha >= desde, Recibo.fecha <= hasta + " 23:59:59").order_by(Recibo.fecha.desc()).all()
-    res = []
-    for r in recibos:
-        cli = db.query(Cliente).filter(Cliente.id == r.cliente_id).first()
-        res.append({
-            "id": r.id, "numero": r.numero, 
-            "cliente": cli.nombre if cli else "N/A",
-            "fecha": r.fecha, "total": float(r.total), "estado": r.estado
+            "id": r.id, "numero": r.numero,
+            "cliente": cli.nombre if cli else "Desconocido",
+            "fecha": r.fecha.isoformat(),
+            "total": float(r.total),
+            "estado": r.estado
         })
     return res
 
 @app.post("/recibos")
 def create_recibo(data: ReciboCreate, db: Session = Depends(get_db)):
     """
-    Crea recibo, descuenta stock y genera deuda si corresponde.
-    Transacción atómica.
+    Crea Recibo + Descuenta Stock + Genera Deuda en Cta Cte
     """
-    # 1. Separar items
-    items_data = data.items or []
-    recibo_data = data.dict()
-    recibo_data.pop("items")
-    
-    # 2. Crear cabecera recibo
-    r = Recibo(**recibo_data)
-    db.add(r)
-    db.flush() # Para obtener r.id
-
     try:
-        # 3. Procesar items y stock
-        for item in items_data:
-            # Buscar producto
+        # 1. Crear Recibo
+        new_recibo = Recibo(
+            numero=data.numero,
+            cliente_id=data.cliente_id,
+            total=data.total,
+            estado=data.estado,
+            observaciones=data.observaciones
+        )
+        db.add(new_recibo)
+        db.flush() # Obtener ID
+
+        # 2. Procesar Items y Stock
+        for item in data.items:
+            # Validar producto
             prod = db.query(Producto).filter(Producto.id == item.producto_id).first()
             if not prod:
                 raise HTTPException(400, f"Producto ID {item.producto_id} no existe")
             
-            # Verificar stock
-            if prod.stock < item.cantidad:
-                raise HTTPException(400, f"Stock insuficiente para '{prod.nombre}'. Stock actual: {prod.stock}")
-            
             # Descontar stock
+            if prod.stock < item.cantidad:
+                # Opcional: Permitir stock negativo o lanzar error. 
+                # Aquí permitimos negativo para no bloquear ventas, pero es decisión de negocio.
+                pass 
+            
             prod.stock -= item.cantidad
             
             # Crear detalle
-            det = ReciboDetalle(recibo_id=r.id, **item.dict())
+            det = ReciboDetalle(
+                recibo_id=new_recibo.id,
+                producto_id=item.producto_id,
+                cantidad=item.cantidad,
+                precio_unitario=item.precio_unitario,
+                subtotal=item.subtotal
+            )
             db.add(det)
 
-        # 4. Generar Cuenta Corriente (Si es PENDIENTE y tiene cliente)
-        if r.cliente_id and r.estado == "PENDIENTE":
-            cc = CuentaCorriente(
-                cliente_id=r.cliente_id,
-                tipo="DEBE",
-                monto=r.total,
-                concepto=f"Recibo {r.numero}",
-                recibo_id=r.id,
-                fecha=datetime.datetime.utcnow()
-            )
-            db.add(cc)
+        # 3. Generar Cuenta Corriente (DEBE)
+        # Todo recibo PENDIENTE genera deuda. Si se paga al contado, 
+        # el frontend debería mandar otro request para saldar o crear un recibo PAGADO.
+        # Asumimos que genera deuda siempre y luego se paga.
+        cc_entry = CuentaCorriente(
+            cliente_id=data.cliente_id,
+            tipo="DEBE",
+            monto=data.total,
+            concepto=f"Recibo {data.numero}",
+            recibo_id=new_recibo.id
+        )
+        db.add(cc_entry)
+        
+        # 4. Registrar Venta (para reporte de ventas)
+        venta = Venta(
+            recibo_id=new_recibo.id,
+            cliente_id=data.cliente_id,
+            total=data.total,
+            forma_pago="Cuenta Corriente",
+            vendedor="Admin"
+        )
+        db.add(venta)
 
         db.commit()
-        db.refresh(r)
-        return r
+        return {"status": "ok", "recibo_id": new_recibo.id}
 
     except Exception as e:
         db.rollback()
-        raise e
+        print(f"Error creando recibo: {e}")
+        raise HTTPException(500, str(e))
 
-@app.delete("/recibos/{rid}")
-def delete_recibo(rid: int, db: Session = Depends(get_db)):
-    """
-    Elimina recibo y RESTAURA el stock de los productos.
-    """
-    r = db.query(Recibo).filter(Recibo.id == rid).first()
-    if not r: raise HTTPException(404, "Recibo no encontrado")
+# === CUENTA CORRIENTE ===
+@app.get("/cuenta-corriente/{cliente_id}")
+def get_cc(cliente_id: int, db: Session = Depends(get_db)):
+    movs = db.query(CuentaCorriente).filter(CuentaCorriente.cliente_id == cliente_id).order_by(desc(CuentaCorriente.fecha)).all()
     
-    try:
-        # Restaurar Stock
-        detalles = db.query(ReciboDetalle).filter(ReciboDetalle.recibo_id == rid).all()
-        for det in detalles:
-            prod = db.query(Producto).filter(Producto.id == det.producto_id).first()
-            if prod:
-                prod.stock += det.cantidad # Devolver stock
-        
-        # Eliminar movimientos de cuenta corriente asociados
-        db.query(CuentaCorriente).filter(CuentaCorriente.recibo_id == rid).delete()
-        
-        # Eliminar recibo (cascada elimina detalles)
-        db.delete(r)
-        db.commit()
-        return {"status": "deleted"}
-        
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(500, f"Error al eliminar recibo: {str(e)}")
+    # Calculamos saldo acumulado visualmente (opcional, o se hace en frontend)
+    # Aquí devolvemos la lista cruda
+    res = []
+    saldo_acumulado = 0 # Esto es complejo de calcular en orden inverso sin window functions
+    
+    # Calculamos saldo total primero
+    debe = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "DEBE").scalar() or 0
+    haber = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "HABER").scalar() or 0
+    saldo_actual = float(debe) - float(haber)
+    
+    # Devolvemos movimientos con saldo snapshot (simple)
+    for m in movs:
+        res.append({
+            "id": m.id,
+            "fecha": m.fecha.isoformat(),
+            "tipo": m.tipo,
+            "monto": float(m.monto),
+            "concepto": m.concepto,
+            "saldo": 0 # El frontend calcula el historial gráfico
+        })
+    return res
 
-# ==========================================
-# RESERVAS
-# ==========================================
+@app.get("/cuenta-corriente/{cliente_id}/saldo")
+def get_saldo_cliente(cliente_id: int, db: Session = Depends(get_db)):
+    debe = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "DEBE").scalar() or 0
+    haber = db.query(func.sum(CuentaCorriente.monto)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "HABER").scalar() or 0
+    return {"saldo": float(debe) - float(haber)}
 
+# === RESERVAS ===
 @app.get("/reservas")
 def list_reservas(db: Session = Depends(get_db)):
-    reservas = db.query(Reserva).order_by(Reserva.fecha_reserva.desc()).all()
+    reservas = db.query(Reserva).order_by(desc(Reserva.fecha_reserva)).all()
     res = []
     for r in reservas:
-        cli = db.query(Cliente).filter(Cliente.id == r.cliente_id).first()
-        prod = db.query(Producto).filter(Producto.id == r.producto_id).first()
         res.append({
-            "id": r.id, 
-            "cliente": cli.nombre if cli else "N/A",
-            "producto": prod.nombre if prod else "N/A",
-            "cantidad": r.cantidad, "fecha_entrega": r.fecha_entrega,
+            "id": r.id,
+            "cliente": r.cliente_txt,
+            "producto": r.producto_txt, # O servicio
+            "cantidad": r.cantidad,
+            "fecha_entrega": r.fecha_entrega,
             "estado": r.estado
         })
     return res
 
 @app.post("/reservas")
 def create_reserva(data: ReservaCreate, db: Session = Depends(get_db)):
-    r = Reserva(**data.dict())
+    r = Reserva(
+        cliente_txt=data.cliente_nombre_temp,
+        producto_txt=data.producto_nombre_temp,
+        cantidad=data.cantidad,
+        fecha_entrega=data.fecha_entrega,
+        estado=data.estado,
+        observaciones=data.observaciones
+    )
     db.add(r)
     db.commit()
-    db.refresh(r)
     return r
 
 @app.patch("/reservas/{rid}/estado")
@@ -438,34 +395,19 @@ def update_reserva_estado(rid: int, estado: str, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "ok"}
 
-# ==========================================
-# VENTAS
-# ==========================================
-
+# === VENTAS (Reporte) ===
 @app.get("/ventas")
 def list_ventas(limit: int = 100, db: Session = Depends(get_db)):
-    ventas = db.query(Venta).order_by(Venta.fecha.desc()).limit(limit).all()
+    ventas = db.query(Venta).order_by(desc(Venta.fecha)).limit(limit).all()
     res = []
     for v in ventas:
         cli = db.query(Cliente).filter(Cliente.id == v.cliente_id).first()
         res.append({
-            "id": v.id, "fecha": v.fecha, 
-            "cliente": cli.nombre if cli else "N/A",
-            "total": float(v.total), "forma_pago": v.forma_pago, "vendedor": v.vendedor
+            "id": v.id,
+            "fecha": v.fecha.isoformat(),
+            "cliente": cli.nombre if cli else "Desconocido",
+            "total": float(v.total),
+            "forma_pago": v.forma_pago,
+            "vendedor": v.vendedor
         })
     return res
-
-# ==========================================
-# CUENTA CORRIENTE
-# ==========================================
-
-@app.get("/cuenta-corriente/{cliente_id}")
-def get_cc_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    movs = db.query(CuentaCorriente).filter(CuentaCorriente.cliente_id == cliente_id).order_by(CuentaCorriente.fecha.desc()).all()
-    return movs
-
-@app.get("/cuenta-corriente/{cliente_id}/saldo")
-def get_saldo(cliente_id: int, db: Session = Depends(get_db)):
-    debe = db.query(func.coalesce(func.sum(CuentaCorriente.monto), 0)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "DEBE").scalar()
-    haber = db.query(func.coalesce(func.sum(CuentaCorriente.monto), 0)).filter(CuentaCorriente.cliente_id == cliente_id, CuentaCorriente.tipo == "HABER").scalar()
-    return {"saldo": float(debe) - float(haber)}
